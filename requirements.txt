@@ -2,3 +2,6 @@ discord.py
 opencv-python
 pytesseract
 Pillow
+numpy
+aiohttp
+python-dotenv
