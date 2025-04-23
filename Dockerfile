@@ -1,7 +1,10 @@
 FROM python:3.10-slim
 
-# Add system dependencies for OpenCV
-RUN apt-get update && apt-get install -y libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+# Install system packages required by OpenCV
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . .
