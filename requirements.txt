@@ -1,7 +1,7 @@
-discord.py==2.3.2
-python-dotenv
-opencv-python
-pytesseract
-numpy
-Pillow
+discord.py==2.2.2
+opencv-python-headless==4.9.0.80
+pytesseract==0.3.10
 aiohttp
+aiofiles
+Pillow
+python-dotenv
