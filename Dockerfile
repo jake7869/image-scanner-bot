@@ -1,13 +1,11 @@
 FROM python:3.10-slim
 
-# Set the working directory
-WORKDIR /app
+# Add system dependencies for OpenCV
+RUN apt-get update && apt-get install -y libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
 
-# Copy all files from your repo into the container
+WORKDIR /app
 COPY . .
 
-# Install required libraries
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Start the bot
 CMD ["python", "image_bot.py"]
