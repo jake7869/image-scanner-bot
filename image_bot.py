@@ -1,12 +1,13 @@
 import os
 import discord
-import cv2
-import numpy as np
-from dotenv import load_dotenv
 from discord.ext import commands
-from PIL import Image
+from dotenv import load_dotenv
+import cv2
 import pytesseract
+import numpy as np
+from collections import defaultdict
 
+# Load environment variables
 load_dotenv()
 TOKEN = os.getenv("YOUR_BOT_TOKEN")
 SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID"))
@@ -15,95 +16,111 @@ LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL_ID"))
 ALERT_USER_ID = int(os.getenv("ALERT_USER_ID"))
 
 intents = discord.Intents.default()
+intents.messages = True
+intents.guilds = True
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-TEMPLATE_DIR = "templates"
-ITEMS = {
-    "dirty_money": {"name": "Dirty Money", "template": "dirty_money.png"},
-    "clean_money": {"name": "Money", "template": "clean_money.png"},
-    "ak47": {"name": "AK47 Baggy", "template": "ak47.png"},
-    "weed": {"name": "Weed", "template": "weed.png"},
-    "coke": {"name": "Coke Pooch", "template": "coke.png"},
-    "meow": {"name": "Meow Meow", "template": "meow.png"},
-    "meth": {"name": "Meth Pooch", "template": "meth.png"},
-    "spice": {"name": "Spice Pooch", "template": "spice.png"}
+ITEM_TEMPLATES = {
+    "dirty_money": "templates/dirty_money.png",
+    "clean_money": "templates/clean_money.png",
+    "coke": "templates/coke.png",
+    "meth": "templates/meth.png",
+    "meow": "templates/meow.png",
+    "spice": "templates/spice.png",
+    "ak47": "templates/ak47.png",
+    "weed": "templates/weed.png"
 }
 
-latest_state = {}
+inventory_state = {}
+user_tallies = defaultdict(lambda: {"in": 0, "out": 0, "drugs_in": 0, "drugs_out": 0})
 
-def extract_quantity(cropped_image):
-    gray = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
-    text = pytesseract.image_to_string(thresh, config='--psm 6')
-    for part in text.split("x"):
-        try:
-            return int(part.replace(",", "").strip())
-        except ValueError:
-            continue
-    return 0
+def detect_quantity(slot_img):
+    # Crop top right corner to extract text quantity
+    h, w = slot_img.shape[:2]
+    qty_region = slot_img[0:int(h * 0.25), int(w * 0.55):]
+    text = pytesseract.image_to_string(qty_region, config='--psm 6').strip()
+    digits = ''.join(filter(lambda x: x.isdigit() or x == ',', text)).replace(',', '')
+    return int(digits) if digits.isdigit() else 0
 
 def detect_items(image):
     found_items = {}
-    for key, item in ITEMS.items():
-        template_path = os.path.join(TEMPLATE_DIR, item['template'])
-        if not os.path.exists(template_path):
-            continue
-        template = cv2.imread(template_path)
+    gray_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    for item_name, template_path in ITEM_TEMPLATES.items():
+        template = cv2.imread(template_path, 0)
         if template is None:
             continue
-        res = cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
-        threshold = 0.85
-        loc = np.where(res >= threshold)
+        res = cv2.matchTemplate(gray_img, template, cv2.TM_CCOEFF_NORMED)
+        loc = np.where(res >= 0.8)
         for pt in zip(*loc[::-1]):
-            crop = image[pt[1]:pt[1]+60, pt[0]+120:pt[0]+220]  # Adjust if needed
-            quantity = extract_quantity(crop)
-            if key not in found_items or quantity > found_items[key]:
-                found_items[key] = quantity
+            x, y = pt
+            slot = image[y:y + template.shape[0], x:x + template.shape[1]]
+            qty = detect_quantity(slot)
+            if item_name in found_items:
+                found_items[item_name] += qty
+            else:
+                found_items[item_name] = qty
     return found_items
-
-def summarize_inventory(items):
-    drugs = sum(v for k, v in items.items() if k in ["ak47", "weed", "coke", "meow", "meth", "spice"])
-    dirty_money = items.get("dirty_money", 0)
-    clean_money = items.get("clean_money", 0)
-    return drugs, dirty_money, clean_money
 
 @bot.event
 async def on_ready():
-    print(f"Bot connected as {bot.user}")
+    print(f'Logged in as {bot.user}!')
 
 @bot.event
 async def on_message(message):
-    global latest_state
     if message.channel.id != SCAN_CHANNEL_ID or not message.attachments:
         return
 
-    attachment = message.attachments[0]
-    image_path = f"temp/{attachment.filename}"
-    await attachment.save(image_path)
-    image = cv2.imread(image_path)
-    if image is None:
+    latest_items = {}
+    for attachment in message.attachments:
+        img_bytes = await attachment.read()
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        latest_items = detect_items(img)
+
+    global inventory_state
+    diffs = {}
+    for item, qty in latest_items.items():
+        previous = inventory_state.get(item, 0)
+        if qty != previous:
+            diffs[item] = qty - previous
+    inventory_state = latest_items
+
+    if not diffs:
         return
-
-    detected = detect_items(image)
-    drugs, dirty, clean = summarize_inventory(detected)
-
-    if not detected:
-        await message.channel.send(f"{message.author.mention} - No meaningful changes or items detected.")
-        return
-
-    log_msg = f"\ud83c\udfe6 Storage now contains:\n• Drugs: {drugs}\n• Dirty Money: £{dirty:,}\n• Clean Money: £{clean:,}"
 
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        await log_channel.send(f"{message.author.mention} - Dropoff\n{log_msg}")
+    user_tag = message.author.mention
+    for line in message.content.splitlines():
+        if "for <@" in line:
+            user_tag = line.split("for ")[-1].strip()
 
-    # Suspicious activity
-    if any(v > 50 for v in detected.values()):
-        alert_user = bot.get_user(ALERT_USER_ID)
-        if alert_user:
-            await message.channel.send(f"\u26a0\ufe0f {alert_user.mention} check this out!")
+    action_lines = []
+    for item, diff in diffs.items():
+        action_type = "added" if diff > 0 else "removed"
+        abs_qty = abs(diff)
+        action_lines.append(f"{item.replace('_', ' ').title()}: {action_type} {abs_qty}")
+        if "money" in item:
+            if diff > 0:
+                user_tallies[user_tag]["in"] += diff
+            else:
+                user_tallies[user_tag]["out"] += abs(diff)
+        else:
+            if diff > 0:
+                user_tallies[user_tag]["drugs_in"] += diff
+            else:
+                user_tallies[user_tag]["drugs_out"] += abs(diff)
 
-    latest_state = detected
+    # Suspicious action alert
+    for item, diff in diffs.items():
+        if abs(diff) > 50 or (item == "dirty_money" and diff < 0 and latest_items.get("dirty_money", 0) < 100000):
+            alert_user = bot.get_user(ALERT_USER_ID)
+            if alert_user:
+                await log_channel.send(f"⚠️ Suspicious action by {message.author.mention} → {item.replace('_', ' ').title()} {diff}\n{alert_user.mention}")
+
+    # Update log
+    inventory_log = "\n".join(action_lines)
+    await log_channel.send(f"📦 {user_tag} - Dropoff:\n{inventory_log}\n\n**Storage now contains:**\n• Drugs: {sum(v for k,v in inventory_state.items() if k not in ['dirty_money', 'clean_money'])}\n• Dirty Money: £{inventory_state.get('dirty_money', 0):,}\n• Clean Money: £{inventory_state.get('clean_money', 0):,}")
 
 bot.run(TOKEN)
