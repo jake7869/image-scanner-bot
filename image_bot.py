@@ -27,6 +27,32 @@ async def on_message(message):
     if message.author.bot:
         print("[SKIP] Message is from a bot.")
         return
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.channel.id != int(os.getenv("SCAN_CHANNEL_ID")):
+        return
+
+    if not message.attachments:
+        print("📭 No attachments found.")
+        return
+
+    for attachment in message.attachments:
+        if attachment.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            await attachment.save("latest.png")
+            print("✅ Image saved as latest.png")
+
+            img = cv2.imread("latest.png")
+            if img is None:
+                print("❌ Failed to load image with OpenCV.")
+                return
+
+            print("🧠 Loaded image into OpenCV")
+            print(f"🖼️ Image shape: {img.shape}")
+
+            print("🔍 Processing image...")
 
     if message.channel.id != SCAN_CHANNEL_ID:
         print(f"[SKIP] Message not in scan channel ({SCAN_CHANNEL_ID}).")
