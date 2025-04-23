@@ -1,7 +1,0 @@
-numpy==1.24.4
-opencv-python-headless==4.7.0.72
-pytesseract
-Pillow
-discord.py
-aiohttp
-python-dotenv
