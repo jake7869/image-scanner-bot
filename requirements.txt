@@ -1,0 +1,4 @@
+discord.py
+opencv-python-headless
+numpy
+python-dotenv
