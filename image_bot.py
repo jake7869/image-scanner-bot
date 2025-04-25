@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import os
 from dotenv import load_dotenv
 import asyncio
+ADMIN_ROLE_ID = 1365134227531890749
 
 load_dotenv()
 
