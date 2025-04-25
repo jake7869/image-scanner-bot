@@ -2,19 +2,27 @@ import os
 import discord
 from discord.ext import commands
 from discord.ui import Button, View, Modal, TextInput
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env if running locally
+
+# Load and validate env vars
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("DISCORD_BOT_TOKEN is missing or empty!")
+
+PANEL_CHANNEL_ID = int(os.getenv("PANEL_CHANNEL_ID") or 0)
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID") or 0)
+LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL_ID") or 0)
+ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID") or 0)
 
 intents = discord.Intents.default()
-intents.message_content = True
+intents.messages = True
 intents.guilds = True
+intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-PANEL_CHANNEL_ID = int(os.getenv("PANEL_CHANNEL_ID"))
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
-LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL_ID"))
-ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID"))
 
 storage = {
     "drugs": 0,
@@ -24,99 +32,68 @@ storage = {
 
 leaderboard = {}
 
-class TakeDrugsModal(Modal, title="Take Drugs"):
+class ConfirmModal(Modal, title="Confirm Action"):
     amount = TextInput(label="How many drugs are being taken?")
-    money = TextInput(label="How much was paid? (number only)")
-    payment_type = TextInput(label="Type of money (clean or dirty)")
-    for_who = TextInput(label="Who is this for? (@mention or leave blank)", required=False)
+    money = TextInput(label="How much money was deposited?")
+    type = TextInput(label="Type (clean or dirty)")
+    target = TextInput(label="Who is it for? (optional @mention)", required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         user = interaction.user
         try:
-            amt = int(self.amount.value.replace(",", ""))
-            paid = int(self.money.value.replace(",", "").replace("£", ""))
-            money_type = "clean" if "clean" in self.payment_type.value.lower() else "dirty"
-            target = self.for_who.value.strip()
-
-            # Who it's for
+            amt = int(self.amount.value.replace(',', ''))
+            paid = int(self.money.value.replace(',', '').replace('£', ''))
+            is_clean = "clean" in self.type.value.lower()
+            target = self.target.value.strip()
             if target.startswith("<@") and target.endswith(">"):
                 target_id = int(target[2:-1].replace("!", ""))
                 member = interaction.guild.get_member(target_id)
-                target_display = member.display_name if member else user.display_name
+                target_display = member.display_name if member else target
             else:
                 target_display = user.display_name
 
-            if amt <= 0 or paid <= 0:
-                return await interaction.response.send_message("Amount and payment must be more than 0.", ephemeral=True)
-
-            if paid < amt * 10000:
-                alert = f"⚠️ Suspicious drop detected by {user.mention} (only £{paid:,} for {amt} drugs)"
-                await bot.get_channel(LOG_CHANNEL_ID).send(alert)
-
             storage["drugs"] -= amt
-            storage[money_type] += paid
+            storage["clean" if is_clean else "dirty"] += paid
 
             leaderboard.setdefault(target_display, {"drugs": 0, "paid": 0})
             leaderboard[target_display]["drugs"] += amt
             leaderboard[target_display]["paid"] += paid
 
-            await interaction.response.send_message("✅ Action logged!", ephemeral=True)
-
-            await bot.get_channel(LOG_CHANNEL_ID).send(
-                f"💊 {user.mention} - Take Drugs for **{target_display}**\n"
-                f"➤ Amount: `{amt}`\n➤ Paid: `£{paid:,}` ({money_type.capitalize()})\n\n"
-                f"📦 **Storage**\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']:,}\n• Clean: £{storage['clean']:,}"
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            await log_channel.send(
+                f"💊 {user.mention} - Take Drugs for {target_display}:\n"
+                f"➤ Amount: `{amt}`\n➤ Paid: `£{paid}` ({'Clean' if is_clean else 'Dirty'})\n"
+                f"\n📥 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']}\n• Clean: £{storage['clean']}"
             )
-            await update_leaderboard()
-
+            await interaction.response.send_message("Logged successfully.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
 
-class DropPanel(View):
+class ButtonView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(Button(label="Take Drugs", style=discord.ButtonStyle.primary, custom_id="take"))
-        self.add_item(Button(label="Reset Leaderboard (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset"))
+
+    @discord.ui.button(label="Reset Leaderboard (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset", row=1)
+    async def reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
+            return await interaction.response.send_message("You do not have permission.", ephemeral=True)
+        leaderboard.clear()
+        await interaction.response.send_message("Leaderboard has been reset.", ephemeral=True)
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot is online as {bot.user}")
-    panel_channel = bot.get_channel(PANEL_CHANNEL_ID)
-    await panel_channel.purge(limit=5)
-    await panel_channel.send("📊 **Drop Panel**", view=DropPanel())
-
-async def update_leaderboard():
-    leaderboard_channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
-    entries = sorted(leaderboard.items(), key=lambda x: x[1]["paid"], reverse=True)
-
-    msg = "📈 **Drug Leaderboard**\n\n"
-    for name, stats in entries:
-        msg += f"**{name}**: {stats['drugs']} drugs taken • £{stats['paid']:,} paid\n"
-
-    msg += (
-        f"\n📦 **Storage Totals:**\n"
-        f"• Drugs: {storage['drugs']}\n"
-        f"• Dirty: £{storage['dirty']:,}\n"
-        f"• Clean: £{storage['clean']:,}"
-    )
-
-    await leaderboard_channel.purge(limit=5)
-    await leaderboard_channel.send(msg)
+    print(f"Bot is online as {bot.user}")
+    channel = bot.get_channel(PANEL_CHANNEL_ID)
+    await channel.purge(limit=5)
+    await channel.send("📊 **Drop Panel**", view=ButtonView())
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    try:
-        if interaction.type.name == "component":
-            if interaction.data["custom_id"] == "take":
-                await interaction.response.send_modal(TakeDrugsModal())
-            elif interaction.data["custom_id"] == "reset":
-                if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
-                    await interaction.response.send_message("❌ You don’t have permission.", ephemeral=True)
-                else:
-                    leaderboard.clear()
-                    await update_leaderboard()
-                    await interaction.response.send_message("✅ Leaderboard reset.", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+    if interaction.type.name == "component":
+        if interaction.data["custom_id"] == "take":
+            await interaction.response.send_modal(ConfirmModal())
+        elif interaction.data["custom_id"] == "reset":
+            pass
 
 bot.run(TOKEN)
