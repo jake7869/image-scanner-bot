@@ -1,184 +1,178 @@
-import os
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands, Interaction, ui
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TOKEN = os.getenv("YOUR_BOT_TOKEN")
-PANEL_CHANNEL_ID = int(os.getenv("PANEL_CHANNEL_ID"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
 LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL_ID"))
+PANEL_CHANNEL_ID = int(os.getenv("PANEL_CHANNEL_ID"))
 ALERT_USER_IDS = [int(uid.strip()) for uid in os.getenv("ALERT_USER_IDS", "").split(",") if uid.strip()]
-ADMIN_ROLE_ID = 1365134227531890749
+ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID"))
 
-intents = discord.Intents.all()
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-storage = {"drugs": 0, "dirty_money": 0, "clean_money": 0}
+storage = {
+    "drugs": 0,
+    "clean": 0,
+    "dirty": 0
+}
+
+user_data = {}
+last_deposit = {}
 panel_message_id = None
-user_stats = {}  # {user_id: {"deposited": 0, "withdrawn": 0, "drugs_in": 0, "drugs_out": 0}}
 
-pending_payment = set()  # Users who confirmed payment before taking drugs
+class DropModal(ui.Modal, title="Drop Details"):
+    action: str
+    is_admin: bool
+    def __init__(self, action, is_admin):
+        super().__init__()
+        self.action = action
+        self.is_admin = is_admin
+        self.add_item(ui.TextInput(label="Amount", placeholder="Enter amount", custom_id="amount"))
+        self.add_item(ui.TextInput(label="For (optional @user)", required=False, custom_id="for"))
+        if action == "remove_money":
+            self.add_item(ui.TextInput(label="Money Type (clean/dirty)", placeholder="clean or dirty", custom_id="type"))
 
-class DropModal(discord.ui.Modal):
-    def __init__(self, title, action_name):
-        super().__init__(title=title)
-        self.action_name = action_name
-        self.add_item(discord.ui.TextInput(label="Amount", custom_id="amount"))
-        self.add_item(discord.ui.TextInput(label="For (optional)", custom_id="for_user", required=False))
-        if action_name in ["Remove Money", "Remove All Money"]:
-            self.add_item(discord.ui.TextInput(label="Type (clean or dirty)", custom_id="type", required=True))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user = interaction.user
-        user_id = user.id
-        roles = [role.id for role in user.roles]
-
-        if self.action_name in ["Deposit Drugs", "Remove Money", "Remove All Money", "Reset Leaderboard"]:
-            if ADMIN_ROLE_ID not in roles:
-                await interaction.response.send_message("❌ You don't have permission to use this button.", ephemeral=True)
-                return
-
-        try:
-            amount = int(self.children[0].value.replace(",", ""))
-        except ValueError:
-            await interaction.response.send_message("Invalid amount.", ephemeral=True)
-            return
-
-        target_input = self.children[1].value.strip()
-        target_user = target_input if target_input else user.mention
-
-        if target_input.startswith("<@") and target_input.endswith(">"):
-            target_id = int(target_input.strip("<@!>"))
-        else:
-            target_id = user_id
-
-        user_stats.setdefault(target_id, {"deposited": 0, "withdrawn": 0, "drugs_in": 0, "drugs_out": 0})
-
+    async def on_submit(self, interaction: Interaction):
+        amount = int(self.children[0].value.replace(",", ""))
+        for_user = self.children[1].value.strip()
+        target = interaction.user.mention
+        if for_user.startswith("<@"):
+            target = for_user
         log_channel = bot.get_channel(LOG_CHANNEL_ID)
-        alert_mentions = " ".join(f"<@{uid}>" for uid in ALERT_USER_IDS)
-        suspicious = False
-        action = self.action_name
 
-        if action == "Deposit Dirty Money":
-            storage["dirty_money"] += amount
-            user_stats[target_id]["deposited"] += amount
-            pending_payment.add(target_id)
-
-        elif action == "Deposit Clean Money":
-            storage["clean_money"] += amount
-            user_stats[target_id]["deposited"] += amount
-            pending_payment.add(target_id)
-
-        elif action == "Deposit Drugs":
-            storage["drugs"] += amount
-            user_stats[target_id]["drugs_in"] += amount
-
-        elif action == "Take Drugs":
-            if target_id not in pending_payment:
-                await interaction.response.send_message("💸 You must deposit money before taking drugs.", ephemeral=True)
+        # Action handling
+        if self.action == "deposit_drugs":
+            if not self.is_admin:
+                await interaction.response.send_message("You don't have permission to use this button.", ephemeral=True)
                 return
-            storage["drugs"] -= amount
-            user_stats[target_id]["drugs_out"] += amount
-            user_stats[target_id]["withdrawn"] += amount * 50000
-            pending_payment.discard(target_id)
-            if amount > 50:
-                suspicious = True
+            storage['drugs'] += amount
+            user_data.setdefault(target, {"money_in": 0, "money_out": 0, "drugs_taken": 0})
+            await log_channel.send(f"📦 {interaction.user.mention} - Deposit Drugs for {target}:
+► Amount: `{amount}`\n\n📅 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']:,}\n• Clean: £{storage['clean']:,}")
 
-        elif action == "Remove Money":
-            type_input = self.children[2].value.strip().lower()
-            if type_input == "dirty":
-                storage["dirty_money"] -= amount
-                action += " (Dirty)"
-            elif type_input == "clean":
-                storage["clean_money"] -= amount
-                action += " (Clean)"
-            else:
-                await interaction.response.send_message("❌ Invalid type. Use 'clean' or 'dirty'.", ephemeral=True)
+        elif self.action == "take_drugs":
+            if target not in last_deposit:
+                alerts = ' '.join(f"<@{uid}>" for uid in ALERT_USER_IDS)
+                await interaction.response.send_message(f"❌ {alerts} {interaction.user.mention} tried to take drugs without depositing.", ephemeral=True)
                 return
-            suspicious = True
-
-        elif action == "Remove All Money":
-            type_input = self.children[2].value.strip().lower()
-            if type_input == "dirty":
-                amount = storage["dirty_money"]
-                storage["dirty_money"] = 0
-                action += f" (ALL Dirty)"
-            elif type_input == "clean":
-                amount = storage["clean_money"]
-                storage["clean_money"] = 0
-                action += f" (ALL Clean)"
-            else:
-                await interaction.response.send_message("❌ Invalid type. Use 'clean' or 'dirty'.", ephemeral=True)
+            if storage['drugs'] < amount:
+                await interaction.response.send_message("Not enough drugs in storage.", ephemeral=True)
                 return
-            suspicious = True
+            storage['drugs'] -= amount
+            user_data.setdefault(target, {"money_in": 0, "money_out": 0, "drugs_taken": 0})
+            user_data[target]['drugs_taken'] += amount
+            await log_channel.send(f"📅 {interaction.user.mention} - Take Drugs for {target}:
+► Amount: `{amount}`\n\n📅 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']:,}\n• Clean: £{storage['clean']:,}")
 
-        elif action == "Reset Leaderboard":
-            user_stats.clear()
-            await bot.get_channel(LEADERBOARD_CHANNEL_ID).send("🔄 Leaderboard has been reset.")
-            return
+        elif self.action == "deposit_dirty":
+            storage['dirty'] += amount
+            user_data.setdefault(target, {"money_in": 0, "money_out": 0, "drugs_taken": 0})
+            user_data[target]['money_in'] += amount
+            last_deposit[target] = amount
+            await log_channel.send(f"📅 {interaction.user.mention} - Deposit Dirty Money for {target}:
+► Amount: `£{amount:,}`\n\n📅 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']:,}\n• Clean: £{storage['clean']:,}")
 
-        msg = f"📦 {user.mention} - **{action}** for {target_user}:\n➤ Amount: `{amount:,}`\n\n🗃️ Inventory:\n• Drugs: {storage['drugs']:,}\n• Dirty: £{storage['dirty_money']:,}\n• Clean: £{storage['clean_money']:,}"
-        if suspicious:
-            msg += f"\n⚠️ {alert_mentions} - Check this action."
+        elif self.action == "remove_money":
+            if not self.is_admin:
+                await interaction.response.send_message("You don't have permission to use this button.", ephemeral=True)
+                return
+            money_type = self.children[2].value.lower()
+            if money_type not in ['clean', 'dirty']:
+                await interaction.response.send_message("Invalid type, must be 'clean' or 'dirty'", ephemeral=True)
+                return
+            if storage[money_type] < amount:
+                await interaction.response.send_message("Not enough money in storage.", ephemeral=True)
+                return
+            storage[money_type] -= amount
+            user_data.setdefault(target, {"money_in": 0, "money_out": 0, "drugs_taken": 0})
+            user_data[target]['money_out'] += amount
+            await log_channel.send(f"📅 {interaction.user.mention} - Remove {money_type.title()} Money:
+► Amount: `£{amount:,}`\n\n📅 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']:,}\n• Clean: £{storage['clean']:,}")
 
-        await log_channel.send(msg)
+        elif self.action == "remove_all_money":
+            if not self.is_admin:
+                await interaction.response.send_message("You don't have permission to use this button.", ephemeral=True)
+                return
+            storage['clean'] = 0
+            storage['dirty'] = 0
+            await log_channel.send(f"📅 {interaction.user.mention} - Removed ALL money from storage.\n\n📅 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']:,}\n• Clean: £{storage['clean']:,}")
+
         await update_leaderboard()
-        await interaction.response.send_message("✅ Action logged!", ephemeral=True)
+        await interaction.response.send_message("Action recorded.", ephemeral=True)
 
-class Panel(discord.ui.View):
+class DropPanel(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="Take Drugs", style=discord.ButtonStyle.primary, custom_id="Take Drugs"))
-        self.add_item(discord.ui.Button(label="Deposit Drugs (Admin Only)", style=discord.ButtonStyle.danger, custom_id="Deposit Drugs"))
-        self.add_item(discord.ui.Button(label="Deposit Dirty Money", style=discord.ButtonStyle.success, custom_id="Deposit Dirty Money"))
-        self.add_item(discord.ui.Button(label="Deposit Clean Money", style=discord.ButtonStyle.success, custom_id="Deposit Clean Money"))
-        self.add_item(discord.ui.Button(label="Remove Money (Admin Only)", style=discord.ButtonStyle.danger, custom_id="Remove Money"))
-        self.add_item(discord.ui.Button(label="Remove All Money (Admin Only)", style=discord.ButtonStyle.danger, custom_id="Remove All Money"))
-        self.add_item(discord.ui.Button(label="Reset Leaderboard (Admin Only)", style=discord.ButtonStyle.secondary, custom_id="Reset Leaderboard"))
+        buttons = [
+            ("Deposit Drugs (Admin Only)", "deposit_drugs", discord.ButtonStyle.green, True),
+            ("Take Drugs", "take_drugs", discord.ButtonStyle.primary, False),
+            ("Deposit Money (Dirty)", "deposit_dirty", discord.ButtonStyle.green, False),
+            ("Remove Money (Admin Only)", "remove_money", discord.ButtonStyle.red, True),
+            ("Remove All Money (Admin Only)", "remove_all_money", discord.ButtonStyle.red, True),
+        ]
+        for label, cid, style, admin in buttons:
+            self.add_item(ui.Button(label=label, custom_id=cid, style=style))
+
+    @ui.button(label="Drop Panel", style=discord.ButtonStyle.blurple, custom_id="drop_panel", disabled=True)
+    async def dummy(self, interaction: Interaction, button: ui.Button):
+        pass
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot is online as {bot.user}")
-    await post_panel()
-    update_leaderboard.start()
+    print(f"Bot is online as {bot.user}")
+    await bot.tree.sync()
+    await send_panel()
+    await update_leaderboard()
 
 @bot.event
-async def on_interaction(interaction: discord.Interaction):
-    cid = interaction.data.get("custom_id")
-    if cid:
-        await interaction.response.send_modal(DropModal(title=cid, action_name=cid))
+async def on_interaction(interaction: Interaction):
+    if interaction.type == discord.InteractionType.component:
+        cid = interaction.data['custom_id']
+        is_admin = any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles)
+        modal = DropModal(action=cid, is_admin=is_admin)
+        await interaction.response.send_modal(modal)
 
-async def post_panel():
+async def send_panel():
     global panel_message_id
-    channel = bot.get_channel(PANEL_CHANNEL_ID)
-    view = Panel()
-    async for msg in channel.history(limit=10):
-        if msg.author == bot.user:
-            await msg.delete()
-    panel = await channel.send("📊 **Drop Panel**", view=view)
-    panel_message_id = panel.id
+    panel_channel = bot.get_channel(PANEL_CHANNEL_ID)
+    if panel_channel:
+        async for msg in panel_channel.history(limit=5):
+            if msg.author == bot.user and msg.components:
+                panel_message_id = msg.id
+                return
+        view = DropPanel()
+        sent = await panel_channel.send("📊 **Drop Panel**", view=view)
+        panel_message_id = sent.id
 
-@tasks.loop(minutes=1)
 async def update_leaderboard():
-    channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
-    embed = discord.Embed(title="📈 Leaderboard", color=discord.Color.blue())
-    sorted_users = sorted(user_stats.items(), key=lambda x: x[1]["deposited"], reverse=True)
-    for uid, stats in sorted_users:
-        embed.add_field(
-            name=f"<@{uid}>",
-            value=(
-                f"💰 Paid: £{stats['deposited']:,}\n"
-                f"💸 Taken: £{stats['withdrawn']:,}\n"
-                f"📦 Drugs In: {stats['drugs_in']:,}\n"
-                f"🚨 Drugs Out: {stats['drugs_out']:,}"
-            ),
-            inline=False
-        )
-    async for msg in channel.history(limit=1):
-        await msg.edit(embed=embed)
+    leaderboard_channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+    if not leaderboard_channel:
         return
-    await channel.send(embed=embed)
+    leaderboard_lines = ["**📈 Drug Leaderboard**\n"]
+    sorted_users = sorted(user_data.items(), key=lambda x: x[1]['money_in'], reverse=True)
+    for user_id, stats in sorted_users:
+        try:
+            user = await bot.fetch_user(int(user_id.strip("<@!>")))
+        except:
+            continue
+        leaderboard_lines.append(f"{user.display_name}: {stats['drugs_taken']} drugs taken")
+        leaderboard_lines.append(f"{user.display_name}: Paid £{stats['money_in']:,}, Took £{stats['money_out']:,}")
+    leaderboard_lines.append(f"\n**Storage Totals:**\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']:,}\n• Clean: £{storage['clean']:,}")
+
+    async for msg in leaderboard_channel.history(limit=5):
+        if msg.author == bot.user:
+            await msg.edit(content="\n".join(leaderboard_lines))
+            return
+    await leaderboard_channel.send("\n".join(leaderboard_lines))
 
 bot.run(TOKEN)
