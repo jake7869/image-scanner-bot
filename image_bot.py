@@ -1,7 +1,7 @@
 import os
 import discord
 from discord.ext import commands
-from discord.ui import Button, View, Modal, InputText
+from discord.ui import Button, View, Modal, TextInput
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -26,12 +26,12 @@ storage = {
 leaderboard = {}
 
 class ConfirmModal(Modal, title="Confirm Action"):
-    amount = InputText(label="How many drugs are being taken?")
-    money = InputText(label="How much money was deposited?")
-    type = InputText(label="Type (clean or dirty)")
-    target = InputText(label="Who is it for? (optional @mention)")
+    amount = TextInput(label="How many drugs are being taken?")
+    money = TextInput(label="How much money was deposited?")
+    type = TextInput(label="Type (clean or dirty)")
+    target = TextInput(label="Who is it for? (optional @mention)", required=False)
 
-    async def callback(self, interaction: discord.Interaction):
+    async def on_submit(self, interaction: discord.Interaction):
         user = interaction.user
         try:
             amt = int(self.amount.value.replace(',', ''))
@@ -43,7 +43,6 @@ class ConfirmModal(Modal, title="Confirm Action"):
                 member = interaction.guild.get_member(target_id)
                 target_display = member.display_name if member else target
             else:
-                member = None
                 target_display = user.display_name
 
             storage["drugs"] -= amt
@@ -68,7 +67,7 @@ class ButtonView(View):
         super().__init__(timeout=None)
         self.add_item(Button(label="Take Drugs", style=discord.ButtonStyle.primary, custom_id="take"))
 
-    @discord.ui.button(label="Reset Leaderboard", style=discord.ButtonStyle.danger, custom_id="reset", row=1)
+    @discord.ui.button(label="Reset Leaderboard (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset", row=1)
     async def reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
             return await interaction.response.send_message("You do not have permission.", ephemeral=True)
