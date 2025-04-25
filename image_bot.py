@@ -4,8 +4,9 @@ from discord.ext import commands
 from discord.ui import Button, View, Modal, TextInput
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # Load .env if running locally
 
+# Load and validate env vars
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_BOT_TOKEN is missing or empty!")
@@ -61,22 +62,10 @@ class ConfirmModal(Modal, title="Confirm Action"):
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
             await log_channel.send(
                 f"💊 {user.mention} - Take Drugs for {target_display}:\n"
-                f"➔ Amount: `{amt}`\n➔ Paid: `£{paid}` ({'Clean' if is_clean else 'Dirty'})\n"
-                f"\n📅 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']}\n• Clean: £{storage['clean']}"
+                f"➤ Amount: `{amt}`\n➤ Paid: `£{paid}` ({'Clean' if is_clean else 'Dirty'})\n"
+                f"\n📥 Storage:\n• Drugs: {storage['drugs']}\n• Dirty: £{storage['dirty']}\n• Clean: £{storage['clean']}"
             )
             await interaction.response.send_message("Logged successfully.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
-
-class RestockDrugsModal(Modal, title="Restock Drugs"):
-    amount = TextInput(label="Enter new drug stock amount")
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
-            return await interaction.response.send_message("You do not have permission.", ephemeral=True)
-        try:
-            storage["drugs"] = int(self.amount.value.replace(',', ''))
-            await interaction.response.send_message(f"Drugs restocked to {storage['drugs']}", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
 
@@ -84,43 +73,52 @@ class ButtonView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(Button(label="Take Drugs", style=discord.ButtonStyle.primary, custom_id="take"))
-        self.add_item(Button(label="Restock Drugs (Admin Only)", style=discord.ButtonStyle.secondary, custom_id="restock", row=1))
-        self.add_item(Button(label="Reset Leaderboard (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset_leaderboard", row=1))
-        self.add_item(Button(label="Reset Money (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset_money", row=1))
 
-    @discord.ui.button(label="Reset Leaderboard (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset_leaderboard_btn", row=1)
-    async def reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Reset Leaderboard (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset_leaderboard", row=1)
+    async def reset_leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
         if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
             return await interaction.response.send_message("You do not have permission.", ephemeral=True)
         leaderboard.clear()
         await interaction.response.send_message("Leaderboard has been reset.", ephemeral=True)
+
+    @discord.ui.button(label="Restock Drugs (Admin Only)", style=discord.ButtonStyle.secondary, custom_id="restock", row=1)
+    async def restock_drugs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
+            return await interaction.response.send_message("You do not have permission.", ephemeral=True)
+
+        class DrugModal(Modal, title="Restock Drugs"):
+            new_amount = TextInput(label="New total drug amount:")
+
+            async def on_submit(modal_self, modal_interaction: discord.Interaction):
+                try:
+                    new_total = int(modal_self.new_amount.value.replace(",", ""))
+                    storage["drugs"] = new_total
+                    await modal_interaction.response.send_message(f"Drugs restocked to: {new_total}", ephemeral=True)
+                except:
+                    await modal_interaction.response.send_message("Invalid amount.", ephemeral=True)
+
+        await interaction.response.send_modal(DrugModal())
+
+    @discord.ui.button(label="Reset Money (Admin Only)", style=discord.ButtonStyle.danger, custom_id="reset_money", row=1)
+    async def reset_money(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
+            return await interaction.response.send_message("You do not have permission.", ephemeral=True)
+
+        storage["dirty"] = 0
+        storage["clean"] = 0
+        await interaction.response.send_message("All money has been reset to £0.", ephemeral=True)
 
 @bot.event
 async def on_ready():
     print(f"Bot is online as {bot.user}")
     channel = bot.get_channel(PANEL_CHANNEL_ID)
     await channel.purge(limit=5)
-    await channel.send("\ud83d\udcca **Drop Panel**", view=ButtonView())
+    await channel.send("📊 **Drop Panel**", view=ButtonView())
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
     if interaction.type.name == "component":
-        cid = interaction.data.get("custom_id")
-        if cid == "take":
+        if interaction.data["custom_id"] == "take":
             await interaction.response.send_modal(ConfirmModal())
-        elif cid == "restock":
-            await interaction.response.send_modal(RestockDrugsModal())
-        elif cid == "reset_money":
-            if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
-                return await interaction.response.send_message("You do not have permission.", ephemeral=True)
-            storage["dirty"] = 0
-            storage["clean"] = 0
-            await interaction.response.send_message("Money values reset to £0.", ephemeral=True)
-        elif cid == "reset_leaderboard":
-            if ADMIN_ROLE_ID not in [role.id for role in interaction.user.roles]:
-                return await interaction.response.send_message("You do not have permission.", ephemeral=True)
-            leaderboard.clear()
-            await interaction.response.send_message("Leaderboard has been reset.", ephemeral=True)
 
 bot.run(TOKEN)
-
